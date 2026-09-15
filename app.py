@@ -235,15 +235,53 @@ def get_song():
         })
 
     try:
-        # First use the exact object produced by /search/.
-        # The fast search response already contains media_url, so this is
-        # instant and avoids the old song.getDetails ID mismatch.
+        # If this ID came from /search/, return the exact playable object.
         cached = SONG_CACHE.get(song_id)
-        if cached:
-            if time.time() - cached["time"] <= SONG_CACHE_TTL:
-                song = dict(cached["data"])
+        if cached and time.time() - cached["time"] <= SONG_CACHE_TTL:
+            song = dict(cached["data"])
+            if song.get("media_url"):
+                if lyrics:
+                    try:
+                        song["lyrics"] = jiosaavn.get_lyrics(song_id)
+                    except Exception:
+                        song["lyrics"] = ""
+                return jsonify(song)
 
-                # Lyrics are optional; fetch them only when explicitly asked.
+        # IMPORTANT:
+        # Search results already contain media_url. If a direct /song/get/
+        # request is made for an ID that is not in this process' cache,
+        # search JioSaavn by the ID and find the exact matching result.
+        params = {
+            "__call": "search.getResults",
+            "q": song_id,
+            "n": 20,
+            "p": 1,
+            "cc": "in",
+            "_format": "json",
+            "_marker": "0",
+            "ctx": "web6dot0",
+            "api_version": "4",
+        }
+
+        r = SESSION.get(JIO_SEARCH_URL, params=params, timeout=5)
+        r.raise_for_status()
+        data = parse_response(r)
+
+        rows = (
+            data.get("results")
+            or data.get("songs", {}).get("data")
+            or data.get("data")
+            or []
+        )
+
+        for row in rows:
+            song = normalize_fast(row)
+            if song and str(song.get("id")) == song_id and song.get("media_url"):
+                SONG_CACHE[song_id] = {
+                    "time": time.time(),
+                    "data": song
+                }
+
                 if lyrics:
                     try:
                         song["lyrics"] = jiosaavn.get_lyrics(song_id)
@@ -252,26 +290,15 @@ def get_song():
 
                 return jsonify(song)
 
-            SONG_CACHE.pop(song_id, None)
-
-        # Cache miss fallback: keep the original API behavior.
+        # Keep the original endpoint as a final fallback.
         resp = jiosaavn.get_song(song_id, lyrics)
+        if resp:
+            return jsonify(resp)
 
-        # A few JioSaavn IDs returned by the newer search endpoint may not
-        # work with the old song.getDetails call. Try the fast search path too.
-        if not resp:
-            results = fast_search(song_id, 1, 20)
-            for item in results:
-                if str(item.get("id")) == song_id:
-                    return jsonify(item)
-
-        if not resp:
-            return jsonify({
-                "status": False,
-                "error": "Invalid Song ID received!"
-            })
-
-        return jsonify(resp)
+        return jsonify({
+            "status": False,
+            "error": "Invalid Song ID received!"
+        })
 
     except Exception as e:
         print_exc()
