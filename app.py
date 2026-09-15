@@ -25,6 +25,12 @@ SESSION.headers.update({
 CACHE = {}
 CACHE_TTL = 300
 
+# Keeps the exact song objects returned by the fast search endpoint.
+# This lets /song/get/ resolve the same IDs returned by /search/ without
+# breaking the existing /search/ endpoint.
+SONG_CACHE = {}
+SONG_CACHE_TTL = 1800
+
 
 def cache_get(key):
     item = CACHE.get(key)
@@ -159,6 +165,7 @@ def fast_search(query, page=1, limit=20):
             continue
         seen.add(song["id"])
         result.append(song)
+        SONG_CACHE[song["id"]] = {"time": time.time(), "data": song}
         if len(result) >= limit:
             break
 
@@ -217,18 +224,61 @@ def song_search():
 
 @app.route("/song/get/")
 def get_song():
-    song_id = request.args.get("id")
+    song_id = str(request.args.get("id") or "").strip()
     lyrics_ = request.args.get("lyrics")
     lyrics = bool(lyrics_ and lyrics_.lower() != "false")
+
     if not song_id:
-        return jsonify({"status": False, "error": "Song ID is required to get a song!"})
+        return jsonify({
+            "status": False,
+            "error": "Song ID is required to get a song!"
+        })
+
     try:
+        # First use the exact object produced by /search/.
+        # The fast search response already contains media_url, so this is
+        # instant and avoids the old song.getDetails ID mismatch.
+        cached = SONG_CACHE.get(song_id)
+        if cached:
+            if time.time() - cached["time"] <= SONG_CACHE_TTL:
+                song = dict(cached["data"])
+
+                # Lyrics are optional; fetch them only when explicitly asked.
+                if lyrics:
+                    try:
+                        song["lyrics"] = jiosaavn.get_lyrics(song_id)
+                    except Exception:
+                        song["lyrics"] = ""
+
+                return jsonify(song)
+
+            SONG_CACHE.pop(song_id, None)
+
+        # Cache miss fallback: keep the original API behavior.
         resp = jiosaavn.get_song(song_id, lyrics)
+
+        # A few JioSaavn IDs returned by the newer search endpoint may not
+        # work with the old song.getDetails call. Try the fast search path too.
         if not resp:
-            return jsonify({"status": False, "error": "Invalid Song ID received!"})
+            results = fast_search(song_id, 1, 20)
+            for item in results:
+                if str(item.get("id")) == song_id:
+                    return jsonify(item)
+
+        if not resp:
+            return jsonify({
+                "status": False,
+                "error": "Invalid Song ID received!"
+            })
+
         return jsonify(resp)
+
     except Exception as e:
-        return jsonify({"status": False, "error": str(e)}), 500
+        print_exc()
+        return jsonify({
+            "status": False,
+            "error": str(e)
+        }), 500
 
 
 @app.route("/playlist/")
