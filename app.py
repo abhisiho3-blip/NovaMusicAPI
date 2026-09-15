@@ -55,31 +55,40 @@ def normalize_fast(row):
     if not isinstance(row, dict):
         return None
 
-    sid = str(row.get("id") or row.get("songid") or row.get("e_songid") or "")
+    # search.getResults puts several song fields inside more_info.
+    mi = row.get("more_info") or row.get("moreInfo") or {}
+    if not isinstance(mi, dict):
+        mi = {}
+
+    sid = str(row.get("id") or row.get("songid") or row.get("e_songid") or mi.get("id") or "")
     title = row.get("title") or row.get("song") or row.get("name") or ""
-    artist = row.get("primary_artists") or row.get("singers") or row.get("artist") or ""
-    album = row.get("album") or row.get("album_name") or "JioSaavn"
-    cover = row.get("image") or row.get("image_url") or row.get("artworkUrl") or ""
-    duration = row.get("duration") or row.get("length") or 0
-    year = row.get("year") or row.get("release_date") or ""
-    language = row.get("language") or ""
-    perma = row.get("perma_url") or row.get("url") or ""
+    artist = (row.get("primary_artists") or row.get("singers") or row.get("artist")
+              or mi.get("primary_artists") or mi.get("singers") or mi.get("artist") or "")
+    album = row.get("album") or row.get("album_name") or mi.get("album") or mi.get("album_name") or "JioSaavn"
+    cover = row.get("image") or row.get("image_url") or row.get("artworkUrl") or mi.get("image") or ""
+    duration = row.get("duration") or row.get("length") or mi.get("duration") or mi.get("album_duration") or 0
+    year = row.get("year") or row.get("release_date") or mi.get("year") or ""
+    language = row.get("language") or mi.get("language") or ""
+    perma = row.get("perma_url") or row.get("url") or mi.get("perma_url") or ""
 
-    media = row.get("media_url") or row.get("mediaUrl") or ""
+    media = (row.get("media_url") or row.get("mediaUrl") or
+             mi.get("media_url") or mi.get("mediaUrl") or "")
 
-    # search.getResults already commonly contains encrypted_media_url.
-    # Decrypt locally — no song.getDetails request is needed.
+    # Depending on the JioSaavn response shape, encrypted_media_url may be
+    # top-level or nested inside more_info.
     if not media:
-        enc = row.get("encrypted_media_url") or row.get("encryptedMediaUrl")
+        enc = (row.get("encrypted_media_url") or row.get("encryptedMediaUrl") or
+               mi.get("encrypted_media_url") or mi.get("encryptedMediaUrl"))
         if enc:
             try:
                 media = helper.decrypt_url(enc)
-                if str(row.get("320kbps", "true")).lower() != "true":
+                kbps = row.get("320kbps") or mi.get("320kbps")
+                if kbps is not None and str(kbps).lower() != "true":
                     media = media.replace("_320.mp4", "_160.mp4")
             except Exception:
                 media = ""
 
-    if not sid or not title or not media:
+    if not sid or not title:
         return None
 
     try:
@@ -198,9 +207,9 @@ def song_search():
             return jsonify(jiosaavn.search_for_song(query, lyrics, songdata))
         if lyrics or not songdata:
             return jsonify(jiosaavn.search_for_song(query, lyrics, songdata))
-        p = max(1, int(request.args.get("p", 1)))
-        n = min(20, max(1, int(request.args.get("n", 20))))
-        return jsonify(fast_search(query, p, n))
+        # Keep the original /song/ endpoint intact. The frontend uses this
+        # only as a fallback when the new fast /search/ endpoint has no data.
+        return jsonify(jiosaavn.search_for_song(query, lyrics, songdata))
     except Exception as e:
         print_exc()
         return jsonify({"status": False, "error": str(e)}), 500
